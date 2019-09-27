@@ -8,6 +8,7 @@ import re
 import tldextract
 import subprocess
 import configparser
+import pandas as pd
 from urllib3 import util
 
 # Type of printing.
@@ -46,7 +47,7 @@ class Inventory:
             self.jprs_url = config['Inventory']['jprs_url']
             self.jprs_post = {'type': 'DOM-HOLDER', 'key': ''}
             self.jprs_regex_multi = config['Inventory']['jprs_regex_multi']
-            self.jprs_regex_single = config['Inventory']['jprs_regex_single']
+            self.jprs_regex_single = config['Inventory']['jprs_regex_single'].split('@')
             self.jpnic_url = config['Inventory']['jpnic_url']
             self.jpnic_post = {'codecheck-sjis': 'にほんねっとわーくいんふぉめーしょんせんたー',
                                'key': '', 'submit': '検索', 'type': 'NET-HOLDER', 'rule': ''}
@@ -61,6 +62,7 @@ class Inventory:
             self.ns_rec_regex = config['Inventory']['ns_rec_regex'].split('@')
             self.soa_rec_regex = config['Inventory']['soa_rec_regex'].split('@')
             self.txt_rec_regex = config['Inventory']['txt_rec_regex'].split('@')
+            self.action_name = 'Search FQDN'
         except Exception as e:
             self.utility.print_message(FAIL, 'Reading config.ini is failure : {}'.format(e))
             self.utility.write_log(40, 'Reading config.ini is failure : {}'.format(e))
@@ -68,17 +70,23 @@ class Inventory:
 
     # Check black list.
     def check_black_list(self, fqdn_list):
+        del_list = []
         for idx, fqdn in enumerate(fqdn_list):
             for exclude_fqdn in self.black_list:
                 if fqdn == exclude_fqdn.replace('\n', '').replace('\r', '').replace('\t', ''):
-                    del fqdn_list[idx]
-                    self.utility.print_message(WARNING, '"{}" is include black list.'.format(fqdn))
+                    del_list.append(idx)
+
+        # Delete FQDN included in black list.
+        for idx in del_list[::-1]:
+            self.utility.print_message(WARNING, '"{}" is include black list.'.format(fqdn_list[idx]))
+            del fqdn_list[idx]
         return fqdn_list
 
     # Merge Web site information.
     def merge_site_info(self, target_info1, target_info2):
         merged_info = {'FQDN': [], 'Score': [], 'Comment': [], 'DNS info': []}
         for idx1, fqdn1 in enumerate(target_info1['FQDN']):
+            del_list = []
             is_match = False
             for idx2, fqdn2 in enumerate(target_info2['FQDN']):
                 if fqdn1 == fqdn2:
@@ -101,12 +109,15 @@ class Inventory:
                         merged_info['Score'].append(target_info2['Score'][idx2])
                         merged_info['Comment'].append(target_info2['Comment'][idx2])
                         merged_info['DNS info'].append([])
+                    del_list.append(idx2)
 
-                    # Delete merged information in target info2.
-                    del target_info2['FQDN'][idx2]
-                    del target_info2['Score'][idx2]
-                    del target_info2['Comment'][idx2]
-                    del target_info2['DNS info'][idx2]
+            # Delete merged information in target info2.
+            for del_idx in del_list[::-1]:
+                del target_info2['FQDN'][del_idx]
+                del target_info2['Score'][del_idx]
+                del target_info2['Comment'][del_idx]
+                del target_info2['DNS info'][del_idx]
+
             if is_match is False:
                 # Add target info1.
                 merged_info['FQDN'].append(fqdn1)
@@ -154,11 +165,14 @@ class Inventory:
 
         # Search FQDN that include link to the target FQDN using Google Custom Search.
         non_reverse_link_fqdn = []
-        for del_idx, search_fqdn in enumerate(link_fqdn_list):
+        del_list = []
+        for idx, search_fqdn in enumerate(link_fqdn_list):
             # Check reverse link to target FQDN.
             if google_hack.search_relevant_fqdn(parsed.host, search_fqdn) is False:
-                non_reverse_link_fqdn.append(link_fqdn_list[del_idx])
-                del link_fqdn_list[del_idx]
+                non_reverse_link_fqdn.append(link_fqdn_list[idx])
+                del_list.append(idx)
+        for idx in del_list[::-1]:
+            del link_fqdn_list[idx]
 
         # Search related FQDN using Google Custom Search.
         searched_list = google_hack.search_related_fqdn(parsed.host, keyword, self.max_search_num)
@@ -182,10 +196,11 @@ class Inventory:
         res, _, _, res_body, _ = self.utility.send_request('POST',
                                                            self.jprs_url,
                                                            body_param=self.jprs_post)
-        if res.status == 200:
+        if res is not None and res.status == 200:
             domain_list = re.findall(self.jprs_regex_multi.format(keyword), res_body)
             if len(domain_list) == 0:
-                domain_list = re.findall(self.jprs_regex_single.format(keyword), res_body)
+                for jprs_regex in self.jprs_regex_single:
+                    domain_list.extend(re.findall(jprs_regex.format(keyword), res_body))
                 if len(domain_list) != 0:
                     self.utility.print_message(NOTE, 'Gathered domain from JPRS. : {}'.format(domain_list))
                 else:
@@ -196,6 +211,7 @@ class Inventory:
         # Explore FQDN using gathered domain list.
         fqdn_list = []
         for domain in list(set(domain_list)):
+            domain = domain.replace('\r', '').replace('\n', '').replace('\t', '')
             fqdn_list.extend(google_hack.search_domain(domain.lower(), self.max_search_num))
 
         # Extract FQDN.
@@ -349,8 +365,13 @@ class Inventory:
     # Explore relevant domain.
     def fqdn_explore(self, spider, google_hack, target_url, keyword):
         self.utility.print_message(NOTE, 'Explore relevant domain.')
-        self.utility.write_log(20, '[In] Explore relevant domain [{}].'.format(self.file_name))
-        fqdn_list = []
+        msg = self.utility.make_log_msg(self.utility.log_in,
+                                        self.utility.log_dis,
+                                        self.file_name,
+                                        action=self.action_name,
+                                        note='Explore relevant domain',
+                                        dest=self.utility.target_host)
+        self.utility.write_log(20, msg)
 
         # Explore FQDN using Web Crawl and Google Custom Search.
         link_fqdn_info, non_link_fqdn_info = self.link_explorer(spider, google_hack, target_url, keyword)
@@ -371,19 +392,11 @@ class Inventory:
         # Explore FQDN (DNS server, Mail server etc) using DNS server.
         merged_fqdn_info = self.dns_explore(merged_fqdn_info)
 
-        # Report FQDN list.
-        self.utility.print_message(NOTE, 'Gathered FQDN List of {}.'.format(keyword))
-        print('='*50)
-        print('Idx\tFQDN\tConfidence\tComment\tDNS info')
-        print('='*50)
-        for idx, fqdn in enumerate(merged_fqdn_info['FQDN']):
-            print('{}\t{}\t{}\t{}\t{}'.format(idx,
-                                              fqdn,
-                                              merged_fqdn_info['Score'][idx],
-                                              merged_fqdn_info['Comment'][idx],
-                                              merged_fqdn_info['DNS info'][idx]))
-            print('-'*50)
-        print('='*50)
-
-        self.utility.write_log(20, '[Out] Explore relevant domain [{}].'.format(self.file_name))
+        msg = self.utility.make_log_msg(self.utility.log_out,
+                                        self.utility.log_dis,
+                                        self.file_name,
+                                        action=self.action_name,
+                                        note='Explore relevant domain',
+                                        dest=self.utility.target_host)
+        self.utility.write_log(20, msg)
         return merged_fqdn_info

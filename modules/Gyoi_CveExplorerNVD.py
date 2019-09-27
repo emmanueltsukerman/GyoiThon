@@ -8,6 +8,7 @@ import json
 import glob
 import zipfile
 import shutil
+import ssl
 import urllib3
 import configparser
 import pandas as pd
@@ -33,6 +34,7 @@ class CveExplorerNVD:
         config.read(os.path.join(self.root_path, 'config.ini'))
 
         try:
+            self.ua = config['Common']['user-agent']
             self.con_timeout = float(config['CveExplorerNVD']['con_timeout'])
             self.max_cve_count = int(config['CveExplorerNVD']['max_cve_count'])
             self.vuln_db_dir = config['CveExplorerNVD']['vuln_db_dir']
@@ -50,10 +52,21 @@ class CveExplorerNVD:
             self.nvd_date_format = config['CveExplorerNVD']['nvd_date_format']
             self.headers = urllib3.make_headers(proxy_basic_auth=self.utility.proxy_user + ':' + self.utility.proxy_pass)
             self.db_colmns = {}
+            self.action_name = 'CVE Explorer'
         except Exception as e:
             self.utility.print_message(FAIL, 'Reading config.ini is failure : {}'.format(e))
             self.utility.write_log(40, 'Reading config.ini is failure : {}'.format(e))
             sys.exit(1)
+
+        # Set HTTP request header.
+        self.http_req_header = {'User-Agent': self.ua,
+                                'Connection': 'keep-alive',
+                                'Accept-Language': 'ja,en-US;q=0.7,en;q=0.3',
+                                'Accept-Encoding': 'gzip, deflate',
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                'Upgrade-Insecure-Requests': '1',
+                                'Content-Type': 'application/x-www-form-urlencoded',
+                                'Cache-Control': 'no-cache'}
 
         # Create/Get vulnerability data base.
         for idx, col_name in enumerate(self.nvd_db_header):
@@ -172,20 +185,26 @@ class CveExplorerNVD:
         self.utility.print_message(OK, 'Get {} CVE list from {}'.format(cve_year, target_url))
 
         http = None
+        ctx = ssl.create_default_context()
+        ctx.set_ciphers('DEFAULT')
+        # ctx.set_ciphers('DEFAULT@SECLEVEL=1')
         if self.utility.proxy != '':
             self.utility.print_message(WARNING, 'Set proxy server: {}'.format(self.utility.proxy))
             if self.utility.proxy_user != '':
                 headers = urllib3.make_headers(proxy_basic_auth=self.utility.proxy_user + ':' + self.utility.proxy_pass)
                 http = urllib3.ProxyManager(timeout=self.con_timeout,
-                                            headers=self.utility.ua,
+                                            headers=self.http_req_header,
                                             proxy_url=self.utility.proxy,
                                             proxy_headers=headers)
             else:
                 http = urllib3.ProxyManager(timeout=self.con_timeout,
-                                            headers=self.utility.ua,
+                                            headers=self.http_req_header,
                                             proxy_url=self.utility.proxy)
         else:
-            http = urllib3.PoolManager(timeout=self.con_timeout, headers=self.utility.ua)
+            http = urllib3.PoolManager(timeout=self.con_timeout,
+                                       headers=self.http_req_header,
+                                       ssl_version=ssl.PROTOCOL_TLS,
+                                       ssl_context=ctx)
 
         try:
             with http.request('GET', target_url, preload_content=False) as res, open(tmp_file, 'wb') as fout:
@@ -286,7 +305,13 @@ class CveExplorerNVD:
 
     # Explore CVE information.
     def cve_explorer(self, product_list):
-        self.utility.write_log(20, '[In] Explore CVE information [{}].'.format(self.file_name))
+        msg = self.utility.make_log_msg(self.utility.log_in,
+                                        self.utility.log_dis,
+                                        self.file_name,
+                                        action=self.action_name,
+                                        note='Explore CVE information',
+                                        dest=self.utility.target_host)
+        self.utility.write_log(20, msg)
         for prod_idx, product in enumerate(product_list):
             self.utility.print_message(NOTE, 'Explore CVE of {}/{} from NVD.'.format(product[1], product[2]))
 
@@ -307,6 +332,12 @@ class CveExplorerNVD:
             for cve_idx, cve_id in enumerate(df_selected_cve['id'].drop_duplicates()):
                 msg = 'Find {} for {}/{} {}.'.format(cve_id, product[1], product[2], product[3])
                 self.utility.print_message(WARNING, msg)
+                msg = self.utility.make_log_msg(self.utility.log_mid,
+                                                self.utility.log_dis,
+                                                self.file_name,
+                                                action=self.action_name,
+                                                note=msg,
+                                                dest=self.utility.target_host)
                 self.utility.write_log(30, msg)
                 cve_info += cve_id + '\n'
                 if cve_idx == (self.max_cve_count - 1):
@@ -316,5 +347,11 @@ class CveExplorerNVD:
                 cve_info = 'Cannot search.'
             product_list[prod_idx].insert(len(product), cve_info)
 
-        self.utility.write_log(20, '[Out] Explore CVE information [{}].'.format(self.file_name))
+        msg = self.utility.make_log_msg(self.utility.log_out,
+                                        self.utility.log_dis,
+                                        self.file_name,
+                                        action=self.action_name,
+                                        note='Explore CVE information',
+                                        dest=self.utility.target_host)
+        self.utility.write_log(20, msg)
         return product_list
